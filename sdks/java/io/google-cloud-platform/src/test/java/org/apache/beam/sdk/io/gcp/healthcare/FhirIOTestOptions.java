@@ -23,9 +23,6 @@ import org.apache.beam.sdk.testing.TestPipelineOptions;
 
 public interface FhirIOTestOptions extends TestPipelineOptions {
 
-  @Description(
-      "FHIR store should match the pattern: projects/PROJECT_ID/locations/LOCATION/datasets/DATASET_ID/fhirStores/HL7V2_STORE_ID")
-  @Required
   String getFhirStore();
 
   void setFhirStore(String value);

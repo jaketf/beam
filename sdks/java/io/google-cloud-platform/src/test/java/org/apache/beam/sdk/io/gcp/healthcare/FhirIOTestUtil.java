@@ -17,23 +17,33 @@
  */
 package org.apache.beam.sdk.io.gcp.healthcare;
 
-import com.google.api.client.util.Base64;
+import com.google.api.client.http.HttpRequestInitializer;
+import com.google.api.client.http.javanet.NetHttpTransport;
+import com.google.api.client.json.gson.GsonFactory;
+import com.google.api.services.healthcare.v1beta1.CloudHealthcareScopes;
 import com.google.api.services.healthcare.v1beta1.model.HttpBody;
-import com.google.api.services.healthcare.v1beta1.model.Message;
+import com.google.api.services.storage.Storage;
+import com.google.api.services.storage.Storage.Objects;
+import com.google.api.services.storage.model.Bucket;
+import com.google.auth.oauth2.GoogleCredentials;
 import java.io.File;
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.List;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import org.apache.beam.sdk.io.gcp.healthcare.FhirIO.Import.ContentStructure;
+import org.apache.beam.sdk.io.gcp.healthcare.HttpHealthcareApiClient.AuthenticatedRetryInitializer;
 
 class FhirIOTestUtil {
+  private Storage storageClient;
+
+  public FhirIOTestUtil() throws IOException {
+    initStorageClient();
+  }
 
   private static Stream<HttpBody> readPrettyBundles() {
     Path resourceDir = Paths.get("src", "test", "resources", "synthea_fhir_stu3_pretty");
@@ -69,5 +79,41 @@ class FhirIOTestUtil {
     for (HttpBody bundle : PRETTY_BUNDLES) {
       client.executeFhirBundle(fhirStore, bundle);
     }
+  }
+
+  private void initStorageClient() throws  IOException {
+    HttpRequestInitializer requestInitializer =
+    new AuthenticatedRetryInitializer(
+        GoogleCredentials.getApplicationDefault()
+            .createScoped(
+                CloudHealthcareScopes.CLOUD_PLATFORM, StorageScopes.CLOUD_PLATFORM_READ_ONLY));
+
+    this.storageClient=
+        new Storage.Builder(new NetHttpTransport(), new GsonFactory(), requestInitializer)
+            .setApplicationName("apache-beam-hl7v2-io")
+            .build();
+  }
+
+  public Bucket createBucket(String project, String name) throws IOException {
+    if (storageClient == null) {
+      initStorageClient();
+    }
+    Bucket bkt = new Bucket();
+    bkt.setId(name);
+    bkt.setName(name);
+    bkt.setLocation("us-central1");
+    return storageClient.buckets().insert(project, bkt).execute();
+  }
+
+  public void deleteBucket(String name) throws IOException {
+    if (storageClient == null) {
+      initStorageClient();
+    }
+    Objects.List blobs = storageClient.objects().list(name);
+    for (Objects.Delete blob: blobs) {
+      storageClient.objects().delete(blobs.getBucket(), blob);
+    }
+
+    storageClient.buckets().delete(name).execute();
   }
 }

@@ -28,6 +28,7 @@ import com.google.api.services.healthcare.v1beta1.CloudHealthcare.Projects.Locat
 import com.google.api.services.healthcare.v1beta1.CloudHealthcareScopes;
 import com.google.api.services.healthcare.v1beta1.model.CreateMessageRequest;
 import com.google.api.services.healthcare.v1beta1.model.Empty;
+import com.google.api.services.healthcare.v1beta1.model.FhirStore;
 import com.google.api.services.healthcare.v1beta1.model.GoogleCloudHealthcareV1beta1FhirRestGcsSource;
 import com.google.api.services.healthcare.v1beta1.model.Hl7V2Store;
 import com.google.api.services.healthcare.v1beta1.model.HttpBody;
@@ -324,7 +325,7 @@ public class HttpHealthcareApiClient implements HealthcareApiClient, Serializabl
     return client.projects().locations().datasets().fhirStores().fhir().delete(resourceId).execute();
   }
 
-  private static class AuthenticatedRetryInitializer extends RetryHttpRequestInitializer {
+  static class AuthenticatedRetryInitializer extends RetryHttpRequestInitializer {
     GoogleCredentials credentials;
 
     public AuthenticatedRetryInitializer(GoogleCredentials credentials) {
@@ -488,5 +489,30 @@ public class HttpHealthcareApiClient implements HealthcareApiClient, Serializabl
         }
       }
     }
+  }
+
+  @Override
+  public FhirStore createFhirStore(String dataset, String name) throws IOException {
+    FhirStore store = new FhirStore();
+    store.setName(name);
+    return client
+        .projects()
+        .locations()
+        .datasets()
+        .fhirStores()
+        .create(dataset, store)
+        .setFhirStoreId(name)
+        .execute();
+  }
+
+  @Override
+  public Empty deleteFhirStore(String store) throws IOException {
+    return client
+        .projects()
+        .locations()
+        .datasets()
+        .fhirStores()
+        .delete(store)
+        .execute();
   }
 }
