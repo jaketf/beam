@@ -75,7 +75,8 @@ public class HL7v2IOWriteIT {
 
   @Test
   public void testHL7v2IOWrite() throws IOException {
-    Pipeline pipeline = Pipeline.create();
+    PipelineOptions options = TestPipeline.testingPipelineOptions().as(GcpOptions.class);
+    Pipeline pipeline = Pipeline.create(options);
     HL7v2IO.Write.Result result =
         pipeline
             .apply(Create.of(MESSAGES).withCoder(new HL7v2MessageCoder()))

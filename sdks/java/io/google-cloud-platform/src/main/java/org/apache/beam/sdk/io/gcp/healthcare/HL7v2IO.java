@@ -659,6 +659,8 @@ public class HL7v2IO {
         HL7v2Message msg = context.element();
         long startTime = System.currentTimeMillis();
         Sleeper sleeper = Sleeper.DEFAULT;
+        // schematized data should be output only.
+        msg.setSchematizedData(null);
         switch (writeMethod) {
           case BATCH_IMPORT:
             // TODO once healthcare API exposes batch import API add that functionality here to
