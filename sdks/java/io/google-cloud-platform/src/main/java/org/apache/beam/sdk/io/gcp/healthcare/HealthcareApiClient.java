@@ -18,11 +18,13 @@
 package org.apache.beam.sdk.io.gcp.healthcare;
 
 import com.google.api.services.healthcare.v1beta1.model.Empty;
+import com.google.api.services.healthcare.v1beta1.model.FhirStore;
 import com.google.api.services.healthcare.v1beta1.model.Hl7V2Store;
 import com.google.api.services.healthcare.v1beta1.model.HttpBody;
 import com.google.api.services.healthcare.v1beta1.model.IngestMessageResponse;
 import com.google.api.services.healthcare.v1beta1.model.ListMessagesResponse;
 import com.google.api.services.healthcare.v1beta1.model.Message;
+import com.google.api.services.healthcare.v1beta1.model.Operation;
 import com.google.api.services.healthcare.v1beta1.model.SearchResourcesRequest;
 import java.io.IOException;
 import java.text.ParseException;
@@ -61,6 +63,9 @@ public interface HealthcareApiClient {
    * @throws IOException the io exception
    */
   Stream<HL7v2Message> getHL7v2MessageStream(String hl7v2Store) throws IOException;
+
+  Operation pollOperation(Operation operation, Long sleepMs)
+      throws InterruptedException, IOException;
 
   /**
    * Gets hl 7 v 2 message id page iterator.
@@ -116,6 +121,10 @@ public interface HealthcareApiClient {
   HttpBody createFhirResource(String fhirStore, String type, HttpBody body) throws IOException;
 
   HttpBody fhirSearch(String fhirStore, SearchResourcesRequest query) throws IOException;
+
+  Operation importFhirResource(
+      String fhirStore, String gcsSourcePath, @Nullable String contentStructure) throws IOException;
+
   /**
    * Execute fhir bundle http body.
    *
@@ -127,26 +136,24 @@ public interface HealthcareApiClient {
   HttpBody executeFhirBundle(String fhirStore, HttpBody bundle) throws IOException;
 
   /**
-   * List fhir resource for patient http body.
-   *
-   * @param fhirStore the fhir store
-   * @param patient the patient
-   * @return the http body
-   * @throws IOException the io exception
-   */
-  HttpBody listFHIRResourceForPatient(String fhirStore, String patient) throws IOException;
-
-  /**
    * Read fhir resource http body.
    *
-   * @param fhirStore the fhir store
-   * @param resource the resource
+   * @param resourceId the resource
    * @return the http body
    * @throws IOException the io exception
    */
-  HttpBody readFHIRResource(String fhirStore, String resource) throws IOException;
+  HttpBody readFhirResource(String resourceId) throws IOException;
+
+  HttpBody deleteFhirResource(String resourceId) throws IOException;
 
   Hl7V2Store createHL7v2Store(String dataset, String name) throws IOException;
 
+  FhirStore createFhirStore(String dataset, String name, String version, String pubsubTopic)
+      throws IOException;
+
+  FhirStore createFhirStore(String dataset, String name, String version) throws IOException;
+
   Empty deleteHL7v2Store(String store) throws IOException;
+
+  Empty deleteFhirStore(String store) throws IOException;
 }

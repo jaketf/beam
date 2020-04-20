@@ -28,17 +28,24 @@ import com.google.api.services.healthcare.v1beta1.CloudHealthcare.Projects.Locat
 import com.google.api.services.healthcare.v1beta1.CloudHealthcareScopes;
 import com.google.api.services.healthcare.v1beta1.model.CreateMessageRequest;
 import com.google.api.services.healthcare.v1beta1.model.Empty;
+import com.google.api.services.healthcare.v1beta1.model.FhirStore;
+import com.google.api.services.healthcare.v1beta1.model.GoogleCloudHealthcareV1beta1FhirRestGcsSource;
 import com.google.api.services.healthcare.v1beta1.model.Hl7V2Store;
 import com.google.api.services.healthcare.v1beta1.model.HttpBody;
+import com.google.api.services.healthcare.v1beta1.model.ImportResourcesRequest;
 import com.google.api.services.healthcare.v1beta1.model.IngestMessageRequest;
 import com.google.api.services.healthcare.v1beta1.model.IngestMessageResponse;
 import com.google.api.services.healthcare.v1beta1.model.ListMessagesResponse;
 import com.google.api.services.healthcare.v1beta1.model.Message;
+import com.google.api.services.healthcare.v1beta1.model.NotificationConfig;
+import com.google.api.services.healthcare.v1beta1.model.Operation;
 import com.google.api.services.healthcare.v1beta1.model.SearchResourcesRequest;
+import com.google.api.services.storage.StorageScopes;
 import com.google.auth.oauth2.GoogleCredentials;
 import java.io.IOException;
 import java.io.Serializable;
 import java.net.URI;
+import java.net.URISyntaxException;
 import java.text.ParseException;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -55,15 +62,33 @@ import javax.annotation.Nullable;
 import org.apache.beam.sdk.extensions.gcp.util.RetryHttpRequestInitializer;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.annotations.VisibleForTesting;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Strings;
+import org.apache.http.HttpEntity;
+import org.apache.http.HttpResponse;
+import org.apache.http.client.HttpClient;
+import org.apache.http.client.methods.HttpUriRequest;
+import org.apache.http.client.methods.RequestBuilder;
+import org.apache.http.client.utils.URIBuilder;
+import org.apache.http.entity.ContentType;
+import org.apache.http.entity.StringEntity;
+import org.apache.http.impl.client.DefaultHttpRequestRetryHandler;
+import org.apache.http.impl.client.HttpClients;
+import org.apache.http.util.EntityUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * A client that talks to the Cloud Healthcare API through HTTP requests. This client is created
  * mainly to encapsulate the unserializable dependencies, since most generated classes are not
  * serializable in the HTTP client.
  */
-public class HttpHealthcareApiClient<T> implements HealthcareApiClient, Serializable {
-
+public class HttpHealthcareApiClient implements HealthcareApiClient, Serializable {
+  private static final String FHIRSTORE_HEADER_CONTENT_TYPE = "application/fhir+json";
+  private static final String FHIRSTORE_HEADER_ACCEPT = "application/fhir+json; charset=utf-8";
+  private static final String FHIRSTORE_HEADER_ACCEPT_CHARSET = "utf-8";
+  private static final Logger LOG = LoggerFactory.getLogger(HttpHealthcareApiClient.class);
   private transient CloudHealthcare client;
+  private transient HttpClient httpClient;
+  private transient GoogleCredentials credentials;
 
   /**
    * Instantiates a new Http healthcare api client.
@@ -82,6 +107,7 @@ public class HttpHealthcareApiClient<T> implements HealthcareApiClient, Serializ
    */
   public HttpHealthcareApiClient(CloudHealthcare client) throws IOException {
     this.client = client;
+    this.httpClient = HttpClients.createDefault();
     initClient();
   }
 
@@ -110,8 +136,42 @@ public class HttpHealthcareApiClient<T> implements HealthcareApiClient, Serializ
   }
 
   @Override
+  public FhirStore createFhirStore(String dataset, String name, String version) throws IOException {
+    return createFhirStore(dataset, name, version, null);
+  }
+
+  @Override
+  public FhirStore createFhirStore(
+      String dataset, String name, String version, @Nullable String pubsubTopic)
+      throws IOException {
+    FhirStore store = new FhirStore();
+
+    store.setVersion(version);
+    store.setDisableReferentialIntegrity(true);
+    store.setEnableUpdateCreate(true);
+    if (pubsubTopic != null) {
+      NotificationConfig notificationConfig = new NotificationConfig();
+      notificationConfig.setPubsubTopic(pubsubTopic);
+      store.setNotificationConfig(notificationConfig);
+    }
+    return client
+        .projects()
+        .locations()
+        .datasets()
+        .fhirStores()
+        .create(dataset, store)
+        .setFhirStoreId(name)
+        .execute();
+  }
+
+  @Override
   public Empty deleteHL7v2Store(String name) throws IOException {
     return client.projects().locations().datasets().hl7V2Stores().delete(name).execute();
+  }
+
+  @Override
+  public Empty deleteFhirStore(String name) throws IOException {
+    return client.projects().locations().datasets().fhirStores().delete(name).execute();
   }
 
   @Override
@@ -262,35 +322,104 @@ public class HttpHealthcareApiClient<T> implements HealthcareApiClient, Serializ
   }
 
   @Override
+  public Operation importFhirResource(
+      String fhirStore, String gcsSourcePath, @Nullable String contentStructure)
+      throws IOException {
+    GoogleCloudHealthcareV1beta1FhirRestGcsSource gcsSrc =
+        new GoogleCloudHealthcareV1beta1FhirRestGcsSource();
+
+    gcsSrc.setUri(gcsSourcePath);
+    ImportResourcesRequest importRequest = new ImportResourcesRequest();
+    importRequest.setGcsSource(gcsSrc).setContentStructure(contentStructure);
+    return client
+        .projects()
+        .locations()
+        .datasets()
+        .fhirStores()
+        .healthcareImport(fhirStore, importRequest)
+        .execute();
+  }
+
+  @Override
+  public Operation pollOperation(Operation operation, Long sleepMs)
+      throws InterruptedException, IOException {
+    LOG.debug(String.format("started opertation %s. polling until complete.", operation.getName()));
+    while (operation.getDone() == null || !operation.getDone()) {
+      // Update the status of the operation with another request.
+      Thread.sleep(sleepMs); // Pause between requests.
+      operation =
+          client.projects().locations().datasets().operations().get(operation.getName()).execute();
+    }
+    return operation;
+  }
+
+  @Override
   public HttpBody executeFhirBundle(String fhirStore, HttpBody bundle) throws IOException {
+    if (httpClient == null || client == null) {
+      initClient();
+    }
+
+    // handle case where R4 http bodies aren't valid JSON.
+    if (bundle.getData().startsWith("GenericData{")) {
+      String data = bundle.getData();
+    }
+
+    credentials.refreshIfExpired();
+    StringEntity requestEntity = new StringEntity(bundle.getData(), ContentType.APPLICATION_JSON);
+    URI uri;
+    try {
+      uri =
+          new URIBuilder(client.getRootUrl() + "v1beta1/" + fhirStore + "/fhir")
+              .setParameter("access_token", credentials.getAccessToken().getTokenValue())
+              .build();
+    } catch (URISyntaxException e) {
+      LOG.error("URL error when making executeBundle request to FHIR API. " + e.getMessage());
+      throw new IllegalArgumentException(e);
+    }
+
+    HttpUriRequest request =
+        RequestBuilder.post()
+            .setUri(uri)
+            .setEntity(requestEntity)
+            .addHeader("Content-Type", FHIRSTORE_HEADER_CONTENT_TYPE)
+            .addHeader("Accept-Charset", FHIRSTORE_HEADER_ACCEPT_CHARSET)
+            .addHeader("Accept", FHIRSTORE_HEADER_ACCEPT)
+            .build();
+
+    HttpResponse response = httpClient.execute(request);
+    HttpEntity responseEntity = response.getEntity();
+    String content = EntityUtils.toString(responseEntity);
+    // Check 2XX code.
+    if (!(response.getStatusLine().getStatusCode() / 100 == 2)) {
+      throw new IOException(
+          String.format(
+              "ExecuteBundle request to FHIR API failed with status code %s: %s",
+              String.valueOf(response.getStatusLine().getStatusCode()), content));
+    }
+    HttpBody responseModel = new HttpBody();
+    responseModel.setData(content);
+    return responseModel;
+  }
+
+  @Override
+  public HttpBody readFhirResource(String resourceId) throws IOException {
+    return client.projects().locations().datasets().fhirStores().fhir().read(resourceId).execute();
+  }
+
+  @Override
+  public HttpBody deleteFhirResource(String resourceId) throws IOException {
     return client
         .projects()
         .locations()
         .datasets()
         .fhirStores()
         .fhir()
-        .executeBundle(fhirStore, bundle)
+        .delete(resourceId)
         .execute();
   }
 
-  @Override
-  public HttpBody listFHIRResourceForPatient(String fhirStore, String patient) throws IOException {
-    return client
-        .projects()
-        .locations()
-        .datasets()
-        .fhirStores()
-        .fhir()
-        .patientEverything(patient)
-        .execute();
-  }
+  public static class AuthenticatedRetryInitializer extends RetryHttpRequestInitializer {
 
-  @Override
-  public HttpBody readFHIRResource(String fhirStore, String resource) throws IOException {
-    return client.projects().locations().datasets().fhirStores().fhir().read(resource).execute();
-  }
-
-  private static class AuthenticatedRetryInitializer extends RetryHttpRequestInitializer {
     GoogleCredentials credentials;
 
     public AuthenticatedRetryInitializer(GoogleCredentials credentials) {
@@ -301,11 +430,11 @@ public class HttpHealthcareApiClient<T> implements HealthcareApiClient, Serializ
     @Override
     public void initialize(HttpRequest request) throws IOException {
       super.initialize(request);
+      HttpHeaders requestHeaders = request.getHeaders();
+      requestHeaders.setUserAgent("apache-beam-healthcare-io");
       if (!credentials.hasRequestMetadata()) {
         return;
       }
-      HttpHeaders requestHeaders = request.getHeaders();
-      requestHeaders.setUserAgent("apache-beam-hl7v2-io");
       URI uri = null;
       if (request.getUrl() != null) {
         uri = request.getUrl().toURI();
@@ -323,19 +452,21 @@ public class HttpHealthcareApiClient<T> implements HealthcareApiClient, Serializ
   }
 
   private void initClient() throws IOException {
+
+    credentials = GoogleCredentials.getApplicationDefault();
     // Create a HttpRequestInitializer, which will provide a baseline configuration to all requests.
-    // HttpRequestInitializer requestInitializer = new RetryHttpRequestInitializer();
-    // GoogleCredentials credentials = GoogleCredentials.getApplicationDefault();
     HttpRequestInitializer requestInitializer =
         new AuthenticatedRetryInitializer(
-            GoogleCredentials.getApplicationDefault()
-                .createScoped(CloudHealthcareScopes.CLOUD_PLATFORM));
+            credentials.createScoped(
+                CloudHealthcareScopes.CLOUD_PLATFORM, StorageScopes.CLOUD_PLATFORM_READ_ONLY));
 
     client =
         new CloudHealthcare.Builder(
                 new NetHttpTransport(), new JacksonFactory(), requestInitializer)
             .setApplicationName("apache-beam-hl7v2-io")
             .build();
+    httpClient =
+        HttpClients.custom().setRetryHandler(new DefaultHttpRequestRetryHandler(10, false)).build();
   }
 
   public static class HL7v2MessagePages implements Iterable<List<HL7v2Message>> {
@@ -445,9 +576,10 @@ public class HttpHealthcareApiClient<T> implements HealthcareApiClient, Serializ
           ListMessagesResponse response = makeListRequest(client, hl7v2Store, filter, pageToken);
           this.isFirstRequest = false;
           this.pageToken = response.getNextPageToken();
-          List<Message> msgs = response.getHl7V2Messages();
+          return response.getHl7V2Messages().stream()
+              .map(HL7v2Message::fromModel)
+              .collect(Collectors.toList());
 
-          return msgs.stream().map(HL7v2Message::fromModel).collect(Collectors.toList());
         } catch (IOException e) {
           this.pageToken = null;
           throw new NoSuchElementException(
