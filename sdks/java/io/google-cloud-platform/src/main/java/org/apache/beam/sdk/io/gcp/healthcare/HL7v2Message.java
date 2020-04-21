@@ -57,6 +57,16 @@ public class HL7v2Message {
     }
   }
 
+  @Override
+  public String toString() {
+    ObjectMapper mapper = new ObjectMapper();
+    try {
+      return mapper.writeValueAsString(this);
+    } catch (IOException e) {
+      return this.getData();
+    }
+  }
+
   /**
    * From model {@link Message} to hl7v2 message.
    *
