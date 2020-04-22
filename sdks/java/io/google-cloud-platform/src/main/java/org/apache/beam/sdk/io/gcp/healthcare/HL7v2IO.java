@@ -667,8 +667,7 @@ public class HL7v2IO {
         // all fields but data should be output only.
         Message model = new Message();
         model.setData(msg.getData());
-        long startTime = System.currentTimeMillis();
-        Sleeper sleeper = Sleeper.DEFAULT;
+        model.setLabels(msg.getLabels());
         switch (writeMethod) {
           case BATCH_IMPORT:
             // TODO once healthcare API exposes batch import API add that functionality here to
