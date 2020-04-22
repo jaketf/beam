@@ -481,7 +481,7 @@ public class HL7v2IO {
       long reqestTime = Instant.now().getMillis();
       HttpHealthcareApiClient.HL7v2MessagePages pages =
           new HttpHealthcareApiClient.HL7v2MessagePages(client, hl7v2Store, this.filter);
-      for (Stream<HL7v2Message> page: pages){
+      for (Stream<HL7v2Message> page : pages) {
         page.forEach(context::output);
       }
       messageListingLatency.update(Instant.now().getMillis() - reqestTime);

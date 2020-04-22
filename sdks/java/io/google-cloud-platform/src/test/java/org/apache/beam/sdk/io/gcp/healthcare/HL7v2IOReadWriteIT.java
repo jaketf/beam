@@ -116,8 +116,9 @@ public class HL7v2IOReadWriteIT {
     pipeline.run().waitUntilFinish();
 
     long numWrittenMessages = 0;
-    for (Stream<HL7v2Message> page:
-        new HttpHealthcareApiClient.HL7v2MessagePages(client, healthcareDataset + "/hl7V2Stores/" + OUTPUT_HL7V2_STORE_NAME)){
+    for (Stream<HL7v2Message> page :
+        new HttpHealthcareApiClient.HL7v2MessagePages(
+            client, healthcareDataset + "/hl7V2Stores/" + OUTPUT_HL7V2_STORE_NAME)) {
       numWrittenMessages += page.count();
     }
     assertEquals(MESSAGES.size(), numWrittenMessages);

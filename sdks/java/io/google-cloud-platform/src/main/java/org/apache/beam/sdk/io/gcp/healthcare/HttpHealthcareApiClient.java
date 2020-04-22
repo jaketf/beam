@@ -48,19 +48,13 @@ import java.net.URI;
 import java.net.URISyntaxException;
 import java.text.ParseException;
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
-import java.util.Spliterator;
-import java.util.Spliterators;
-import java.util.stream.Collectors;
 import java.util.stream.Stream;
-import java.util.stream.StreamSupport;
 import javax.annotation.Nullable;
 import org.apache.beam.sdk.extensions.gcp.util.RetryHttpRequestInitializer;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.annotations.VisibleForTesting;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Strings;
 import org.apache.http.HttpEntity;
 import org.apache.http.HttpResponse;
@@ -541,6 +535,7 @@ public class HttpHealthcareApiClient implements HealthcareApiClient, Serializabl
           ListMessagesResponse response = makeListRequest(client, hl7v2Store, filter, pageToken);
           this.isFirstRequest = false;
           this.pageToken = response.getNextPageToken();
+          List<Message> msgs = response.getHl7V2Messages();
           return msgs.stream().map(HL7v2Message::fromModel);
         } catch (IOException e) {
           this.pageToken = null;

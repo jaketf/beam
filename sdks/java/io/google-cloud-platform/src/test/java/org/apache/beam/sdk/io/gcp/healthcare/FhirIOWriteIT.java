@@ -57,8 +57,7 @@ public class FhirIOWriteIT {
 
   public String version;
 
-  @Rule
-  public transient TestPipeline pipeline = TestPipeline.create();
+  @Rule public transient TestPipeline pipeline = TestPipeline.create();
 
   public FhirIOWriteIT(String version) {
     this.version = version;

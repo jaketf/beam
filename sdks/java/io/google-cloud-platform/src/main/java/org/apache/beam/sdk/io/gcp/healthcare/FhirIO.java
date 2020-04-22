@@ -105,8 +105,8 @@ import org.slf4j.LoggerFactory;
  * @see <a
  *     href=>https://cloud.google.com/healthcare/docs/reference/rest/v1beta1/projects.locations.datasets.fhirStores/import></a>
  *     A {@link PCollection} of {@link HttpBody} can be ingested into an Fhir store using {@link
- *     FhirIO.Write#fhirStoresImport(String, String, String, FhirIO.Import.ContentStructure)} This will return a
- *     {@link FhirIO.Write.Result} on which you can call {@link
+ *     FhirIO.Write#fhirStoresImport(String, String, String, FhirIO.Import.ContentStructure)} This
+ *     will return a {@link FhirIO.Write.Result} on which you can call {@link
  *     FhirIO.Write.Result#getFailedInsertsWithErr()} to retrieve a {@link PCollection} of {@link
  *     HealthcareIOError} containing the {@link HttpBody} that failed to be ingested and the
  *     exception.

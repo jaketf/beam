@@ -84,10 +84,10 @@ class HL7v2IOTestUtil {
   /** Clear all messages from the HL7v2 store. */
   static void deleteAllHL7v2Messages(HealthcareApiClient client, String hl7v2Store)
       throws IOException {
-    for (Stream<HL7v2Message> page: new HL7v2MessagePages(client, hl7v2Store)){
-            for (String msgId : page.map(HL7v2Message::getName).collect(Collectors.toList())){
-              client.deleteHL7v2Message(msgId);
-            }
+    for (Stream<HL7v2Message> page : new HL7v2MessagePages(client, hl7v2Store)) {
+      for (String msgId : page.map(HL7v2Message::getName).collect(Collectors.toList())) {
+        client.deleteHL7v2Message(msgId);
+      }
     }
   }
 
@@ -176,8 +176,8 @@ class HL7v2IOTestUtil {
       // Output all elements of all pages.
       HttpHealthcareApiClient.HL7v2MessagePages pages =
           new HttpHealthcareApiClient.HL7v2MessagePages(client, hl7v2Store, this.filter);
-      for (Stream<HL7v2Message> page: pages) {
-          page.map(HL7v2Message::getName).forEach(context::output);
+      for (Stream<HL7v2Message> page : pages) {
+        page.map(HL7v2Message::getName).forEach(context::output);
       }
     }
   }

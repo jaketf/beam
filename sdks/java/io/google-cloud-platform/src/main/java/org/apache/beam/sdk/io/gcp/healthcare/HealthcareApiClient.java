@@ -28,7 +28,6 @@ import com.google.api.services.healthcare.v1beta1.model.Operation;
 import com.google.api.services.healthcare.v1beta1.model.SearchResourcesRequest;
 import java.io.IOException;
 import java.text.ParseException;
-import java.util.stream.Stream;
 import javax.annotation.Nullable;
 
 /** Defines a client that talks to the Cloud Healthcare API. */
@@ -55,6 +54,8 @@ public interface HealthcareApiClient {
    */
   Hl7V2Store getHL7v2Store(String storeName) throws IOException;
 
+  Operation pollOperation(Operation operation, Long sleepMs)
+      throws InterruptedException, IOException;
   /**
    * Make hl 7 v 2 list request list messages response.
    *
