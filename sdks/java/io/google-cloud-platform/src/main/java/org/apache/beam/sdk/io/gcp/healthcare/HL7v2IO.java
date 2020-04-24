@@ -39,6 +39,10 @@ import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.Reshuffle;
+import org.apache.beam.sdk.transforms.windowing.AfterProcessingTime;
+import org.apache.beam.sdk.transforms.windowing.AfterWatermark;
+import org.apache.beam.sdk.transforms.windowing.GlobalWindows;
+import org.apache.beam.sdk.transforms.windowing.Window;
 import org.apache.beam.sdk.values.PBegin;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollectionTuple;
@@ -49,6 +53,7 @@ import org.apache.beam.sdk.values.TupleTag;
 import org.apache.beam.sdk.values.TupleTagList;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Throwables;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableMap;
+import org.joda.time.Duration;
 import org.joda.time.Instant;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -439,6 +444,20 @@ public class HL7v2IO {
           .apply(Create.of(this.hl7v2Stores))
           .apply(ParDo.of(new ListHL7v2MessagesFn(this.filter)))
           .setCoder(new HL7v2MessageCoder())
+          // Listing takes a long time for each input element (HL7v2 store) because it has to
+          // paginate through results in a single thread / ProcessElement call in order to keep
+          // track of page token.
+          // Eagerly emit data on 1 second intervals so downstream processing can get started before
+          // all of the list results have been paginated through.
+          .apply(
+              Window.<HL7v2Message>into(new GlobalWindows())
+                  .triggering(
+                      AfterWatermark.pastEndOfWindow()
+                          .withEarlyFirings(
+                              AfterProcessingTime.pastFirstElementInPane()
+                                  .plusDelayOf(Duration.standardSeconds(1))))
+                  .discardingFiredPanes())
+          // Break fusion to encourage parallelization of downstream processing.
           .apply(Reshuffle.viaRandomKey());
     }
   }
@@ -447,8 +466,8 @@ public class HL7v2IO {
 
     private final String filter;
     private transient HealthcareApiClient client;
-    private Distribution messageListingLatency =
-        Metrics.distribution(ListHL7v2MessagesFn.class, "message-list-latency");
+    private Distribution messageListingLatencyMs =
+        Metrics.distribution(ListHL7v2MessagesFn.class, "message-list-pagination-latency-ms");
     /**
      * Instantiates a new List HL7v2 fn.
      *
@@ -478,13 +497,14 @@ public class HL7v2IO {
     public void listMessages(ProcessContext context) throws IOException {
       String hl7v2Store = context.element();
       // Output all elements of all pages.
-      long reqestTime = Instant.now().getMillis();
       HttpHealthcareApiClient.HL7v2MessagePages pages =
           new HttpHealthcareApiClient.HL7v2MessagePages(client, hl7v2Store, this.filter);
+      long reqestTime = Instant.now().getMillis();
       for (Stream<HL7v2Message> page : pages) {
+        messageListingLatencyMs.update(Instant.now().getMillis() - reqestTime);
         page.forEach(context::output);
+        reqestTime = Instant.now().getMillis();
       }
-      messageListingLatency.update(Instant.now().getMillis() - reqestTime);
     }
   }
 
@@ -627,8 +647,8 @@ public class HL7v2IO {
       // TODO when the healthcare API releases a bulk import method this should use that to improve
       // throughput.
 
-      private Distribution messageIngestLatency =
-          Metrics.distribution(WriteHL7v2Fn.class, "message-ingest-latency");
+      private Distribution messageIngestLatencyMs =
+          Metrics.distribution(WriteHL7v2Fn.class, "message-ingest-latency-ms");
       private Counter failedMessageWrites =
           Metrics.counter(WriteHL7v2Fn.class, "failed-hl7v2-message-writes");
       private final String hl7v2Store;
@@ -682,7 +702,7 @@ public class HL7v2IO {
             try {
               long requestTimestamp = Instant.now().getMillis();
               client.ingestHL7v2Message(hl7v2Store, model);
-              messageIngestLatency.update(Instant.now().getMillis() - requestTimestamp);
+              messageIngestLatencyMs.update(Instant.now().getMillis() - requestTimestamp);
             } catch (Exception e) {
               failedMessageWrites.inc();
               LOG.warn(
