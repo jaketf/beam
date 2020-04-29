@@ -35,6 +35,9 @@ import org.apache.beam.sdk.io.gcp.healthcare.HttpHealthcareApiClient.HealthcareH
 /** Defines a client that talks to the Cloud Healthcare API. */
 public interface HealthcareApiClient {
 
+  Stream<HL7v2Message> getHL7v2MessageStream(String hl7v2Store, @Nullable String filter)
+      throws IOException;
+
   /**
    * Fetches an Hl7v2 message by its name from a Hl7v2 store.
    *
