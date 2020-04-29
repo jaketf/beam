@@ -407,7 +407,7 @@ public class HttpHealthcareApiClient implements HealthcareApiClient, Serializabl
       if (statusCode / 100 == 2) {
         throw new IllegalArgumentException(
             String.format(
-                "2xx codes should not be exceptions. Got status code: %s with body:",
+                "2xx codes should not be exceptions. Got status code: %s with body: %s",
                 statusCode, message));
       }
     }
