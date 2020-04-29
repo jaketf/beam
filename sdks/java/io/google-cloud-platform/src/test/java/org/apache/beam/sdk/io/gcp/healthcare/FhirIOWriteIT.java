@@ -99,7 +99,7 @@ public class FhirIOWriteIT {
   public void testFhirIO_ExecuteBundle() throws IOException {
     FhirIO.Write.Result writeResult =
         pipeline
-            .apply(Create.of(BUNDLES.get(version)).withCoder(new HttpBodyCoder()))
+            .apply(Create.of(BUNDLES.get(version)))
             .apply(FhirIO.Write.executeBundles(options.getFhirStore()));
 
     PAssert.that(writeResult.getFailedInsertsWithErr()).empty();
@@ -112,7 +112,7 @@ public class FhirIOWriteIT {
     Pipeline pipeline = Pipeline.create(options);
     FhirIO.Write.Result result =
         pipeline
-            .apply(Create.of(BUNDLES.get(version)).withCoder(new HttpBodyCoder()))
+            .apply(Create.of(BUNDLES.get(version)))
             .apply(
                 FhirIO.Write.fhirStoresImport(
                     options.getFhirStore(),

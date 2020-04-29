@@ -28,7 +28,9 @@ import com.google.api.services.healthcare.v1beta1.model.Operation;
 import com.google.api.services.healthcare.v1beta1.model.SearchResourcesRequest;
 import java.io.IOException;
 import java.text.ParseException;
+import java.util.stream.Stream;
 import javax.annotation.Nullable;
+import org.apache.beam.sdk.io.gcp.healthcare.HttpHealthcareApiClient.HealthcareHttpException;
 
 /** Defines a client that talks to the Cloud Healthcare API. */
 public interface HealthcareApiClient {
@@ -53,6 +55,15 @@ public interface HealthcareApiClient {
    * @throws IOException the io exception
    */
   Hl7V2Store getHL7v2Store(String storeName) throws IOException;
+
+  /**
+   * Gets HL7v2 message id page iterator.
+   *
+   * @param hl7v2Store the HL7v2 store
+   * @return the HL7v2 message id page iterator
+   * @throws IOException the io exception
+   */
+  Stream<HL7v2Message> getHL7v2MessageStream(String hl7v2Store) throws IOException;
 
   Operation pollOperation(Operation operation, Long sleepMs)
       throws InterruptedException, IOException;
@@ -112,7 +123,8 @@ public interface HealthcareApiClient {
    * @return the http body
    * @throws IOException the io exception
    */
-  HttpBody executeFhirBundle(String fhirStore, HttpBody bundle) throws IOException;
+  HttpBody executeFhirBundle(String fhirStore, String bundle)
+      throws IOException, HealthcareHttpException;
 
   /**
    * Read fhir resource http body.
