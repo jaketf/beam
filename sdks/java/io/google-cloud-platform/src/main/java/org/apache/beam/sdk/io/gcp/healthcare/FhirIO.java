@@ -18,6 +18,7 @@
 package org.apache.beam.sdk.io.gcp.healthcare;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.api.services.healthcare.v1beta1.model.HttpBody;
 import com.google.api.services.healthcare.v1beta1.model.Operation;
 import com.google.auto.value.AutoValue;
 import java.io.IOException;
@@ -48,7 +49,6 @@ import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.WithKeys;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
-import org.apache.beam.sdk.util.Sleeper;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollectionTuple;
@@ -321,6 +321,7 @@ public class FhirIO {
             Metrics.counter(
                 FhirIO.Read.FetchString.StringGetFn.class, "successful-hl7v2-message-gets");
         private HealthcareApiClient client;
+        private ObjectMapper mapper;
 
         /** Instantiates a new Hl 7 v 2 message get fn. */
         StringGetFn() {}
@@ -333,6 +334,7 @@ public class FhirIO {
         @Setup
         public void instantiateHealthcareClient() throws IOException {
           this.client = new HttpHealthcareApiClient();
+          this.mapper = new ObjectMapper();
         }
 
         /**
@@ -359,16 +361,14 @@ public class FhirIO {
         private String fetchResource(HealthcareApiClient client, String resourceId)
             throws IOException, IllegalArgumentException {
           long startTime = System.currentTimeMillis();
-          Sleeper sleeper = Sleeper.DEFAULT;
 
-          com.google.api.services.healthcare.v1beta1.model.HttpBody resource =
-              client.readFhirResource(resourceId);
+          HttpBody resource = client.readFhirResource(resourceId);
 
           if (resource == null) {
             throw new IOException(String.format("GET request for %s returned null", resourceId));
           }
           this.successfulStringGets.inc();
-          return resource.getData();
+          return mapper.writeValueAsString(resource);
         }
       }
     }
