@@ -47,19 +47,13 @@ import java.net.URI;
 import java.net.URISyntaxException;
 import java.text.ParseException;
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
-import java.util.Spliterator;
-import java.util.Spliterators;
 import java.util.stream.Collectors;
-import java.util.stream.Stream;
-import java.util.stream.StreamSupport;
 import javax.annotation.Nullable;
 import org.apache.beam.sdk.extensions.gcp.util.RetryHttpRequestInitializer;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.annotations.VisibleForTesting;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Strings;
 import org.apache.http.HttpEntity;
 import org.apache.http.HttpResponse;
@@ -72,6 +66,7 @@ import org.apache.http.entity.StringEntity;
 import org.apache.http.impl.client.DefaultHttpRequestRetryHandler;
 import org.apache.http.impl.client.HttpClients;
 import org.apache.http.util.EntityUtils;
+import org.joda.time.Instant;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -108,13 +103,6 @@ public class HttpHealthcareApiClient implements HealthcareApiClient, Serializabl
     this.client = client;
     this.httpClient = HttpClients.createDefault();
     initClient();
-  }
-
-  @VisibleForTesting
-  static <T, X extends Collection<T>> Stream<T> flattenIteratorCollectionsToStream(
-      Iterator<X> iterator) {
-    Spliterator<Collection<T>> spliterator = Spliterators.spliteratorUnknownSize(iterator, 0);
-    return StreamSupport.stream(spliterator, false).flatMap(Collection::stream);
   }
 
   public JsonFactory getJsonFactory() {
@@ -174,8 +162,112 @@ public class HttpHealthcareApiClient implements HealthcareApiClient, Serializabl
   }
 
   @Override
+  public Instant getEarliestHL7v2SendTime(String hl7v2Store, @Nullable String filter)
+      throws IOException {
+    ListMessagesResponse response =
+        client
+            .projects()
+            .locations()
+            .datasets()
+            .hl7V2Stores()
+            .messages()
+            .list(hl7v2Store)
+            .setFilter(filter)
+            .set("view", "full") // needed to retrieve the value for sendtime
+            .setOrderBy("sendTime") // default order is ascending
+            // https://cloud.google.com/apis/design/design_patterns#sorting_order
+            .setPageSize(1) // Only interested in the earliest sendTime
+            .execute();
+    if (response.isEmpty()) {
+      throw new IllegalArgumentException(
+          String.format(
+              "Could not find earliest send time. The filter %s  matched no results on "
+                  + "HL7v2 Store: %s",
+              filter, hl7v2Store));
+    }
+    String sendTime = response.getHl7V2Messages().get(0).getSendTime();
+    if (Strings.isNullOrEmpty(sendTime)) {
+      LOG.warn(
+          String.format(
+              "Earliest message in %s has null or empty sendTime defaulting to Epoch.",
+              hl7v2Store));
+      return Instant.ofEpochMilli(0);
+    }
+    // sendTime is conveniently RFC3339 UTC "Zulu"
+    // https://cloud.google.com/healthcare/docs/reference/rest/v1beta1/projects.locations.datasets.hl7V2Stores.messages#Message
+    return Instant.parse(sendTime);
+  }
+
+  @Override
+  public Instant getLatestHL7v2SendTime(String hl7v2Store, @Nullable String filter)
+      throws IOException {
+    ListMessagesResponse response =
+        client
+            .projects()
+            .locations()
+            .datasets()
+            .hl7V2Stores()
+            .messages()
+            .list(hl7v2Store)
+            .setFilter(filter)
+            .set("view", "full") // needed to retrieve the value for sendTime
+            .setOrderBy("sendTime desc")
+            // https://cloud.google.com/apis/design/design_patterns#sorting_order
+            .setPageSize(1) // Only interested in the earliest sendTime
+            .execute();
+    if (response.isEmpty()) {
+      throw new IllegalArgumentException(
+          String.format(
+              "Could not find latest send time. The filter %s  matched no results on "
+                  + "HL7v2 Store: %s",
+              filter, hl7v2Store));
+    }
+    String sendTime = response.getHl7V2Messages().get(0).getSendTime();
+    if (Strings.isNullOrEmpty(sendTime)) {
+      LOG.warn(
+          String.format(
+              "Latest message in %s has null or empty sendTime defaulting to now.", hl7v2Store));
+      return Instant.now();
+    }
+    // sendTime is conveniently RFC3339 UTC "Zulu"
+    // https://cloud.google.com/healthcare/docs/reference/rest/v1beta1/projects.locations.datasets.hl7V2Stores.messages#Message
+    return Instant.parse(sendTime);
+  }
+
+  @Override
+  public ListMessagesResponse makeSendTimeBoundHL7v2ListRequest(
+      String hl7v2Store,
+      Instant start,
+      @Nullable Instant end,
+      @Nullable String otherFilter,
+      @Nullable String orderBy,
+      @Nullable String pageToken)
+      throws IOException {
+    String filter;
+    String sendTimeFilter = "";
+    if (start != null) {
+      sendTimeFilter += String.format("sendTime >= \"%s\"", start.toString());
+      if (end != null) {
+        sendTimeFilter += String.format(" AND sendTime < \"%s\"", end.toString());
+      }
+    }
+
+    // TODO(jaketf) does this cause issues if other filter has predicate on sendTime?
+    if (otherFilter != null && !Strings.isNullOrEmpty(sendTimeFilter)) {
+      filter = sendTimeFilter + " AND " + otherFilter;
+    } else {
+      filter = sendTimeFilter;
+    }
+    return makeHL7v2ListRequest(hl7v2Store, filter, orderBy, pageToken);
+  }
+
+  @Override
   public ListMessagesResponse makeHL7v2ListRequest(
-      String hl7v2Store, @Nullable String filter, @Nullable String pageToken) throws IOException {
+      String hl7v2Store,
+      @Nullable String filter,
+      @Nullable String orderBy,
+      @Nullable String pageToken)
+      throws IOException {
 
     Messages.List baseRequest =
         client
@@ -186,42 +278,20 @@ public class HttpHealthcareApiClient implements HealthcareApiClient, Serializabl
             .messages()
             .list(hl7v2Store)
             .set("view", "full")
+            .setFilter(filter)
+            .setPageSize(1000)
             .setPageToken(pageToken);
-
-    if (Strings.isNullOrEmpty(filter)) {
+    if (orderBy == null) {
       return baseRequest.execute();
     } else {
-      return baseRequest.setFilter(filter).execute();
+      return baseRequest.setOrderBy(orderBy).execute();
     }
   }
 
-  /**
-   * Gets message id page iterator.
-   *
-   * @param hl7v2Store the HL7v2 store
-   * @return the message id page iterator
-   * @throws IOException the io exception
-   */
   @Override
-  public Stream<HL7v2Message> getHL7v2MessageStream(String hl7v2Store) throws IOException {
-    return getHL7v2MessageStream(hl7v2Store, null);
-  }
-
-  /**
-   * Get a {@link Stream} of message IDs from flattening the pages of a new {@link
-   * HL7v2MessagePages}.
-   *
-   * @param hl7v2Store the HL7v2 store
-   * @param filter the filter
-   * @return the message id Stream
-   * @throws IOException the io exception
-   */
-  @Override
-  public Stream<HL7v2Message> getHL7v2MessageStream(String hl7v2Store, @Nullable String filter)
+  public List<HL7v2Message> getHL7v2MessageStream(String hl7v2Store, @Nullable String filter)
       throws IOException {
-    Iterator<List<HL7v2Message>> iterator =
-        new HL7v2MessagePages(this, hl7v2Store, filter).iterator();
-    return flattenIteratorCollectionsToStream(iterator);
+    return null;
   }
 
   /**
@@ -462,6 +532,9 @@ public class HttpHealthcareApiClient implements HealthcareApiClient, Serializabl
 
     private final String hl7v2Store;
     private final String filter;
+    private final String orderBy;
+    private final Instant start;
+    private final Instant end;
     private transient HealthcareApiClient client;
 
     /**
@@ -470,10 +543,17 @@ public class HttpHealthcareApiClient implements HealthcareApiClient, Serializabl
      * @param client the client
      * @param hl7v2Store the HL7v2 store
      */
-    HL7v2MessagePages(HealthcareApiClient client, String hl7v2Store) {
+    HL7v2MessagePages(
+        HealthcareApiClient client,
+        String hl7v2Store,
+        @Nullable Instant start,
+        @Nullable Instant end) {
       this.client = client;
       this.hl7v2Store = hl7v2Store;
       this.filter = null;
+      this.orderBy = null;
+      this.start = start;
+      this.end = end;
     }
 
     /**
@@ -483,10 +563,27 @@ public class HttpHealthcareApiClient implements HealthcareApiClient, Serializabl
      * @param hl7v2Store the HL7v2 store
      * @param filter the filter
      */
-    HL7v2MessagePages(HealthcareApiClient client, String hl7v2Store, @Nullable String filter) {
+    HL7v2MessagePages(
+        HealthcareApiClient client,
+        String hl7v2Store,
+        @Nullable Instant start,
+        @Nullable Instant end,
+        @Nullable String filter,
+        @Nullable String orderBy) {
       this.client = client;
       this.hl7v2Store = hl7v2Store;
       this.filter = filter;
+      this.orderBy = orderBy;
+      this.start = start;
+      this.end = end;
+    }
+
+    public Instant getStart() {
+      return this.start;
+    }
+
+    public Instant getEnd() {
+      return this.end;
     }
 
     /**
@@ -502,15 +599,20 @@ public class HttpHealthcareApiClient implements HealthcareApiClient, Serializabl
     public static ListMessagesResponse makeListRequest(
         HealthcareApiClient client,
         String hl7v2Store,
+        @Nullable Instant start,
+        @Nullable Instant end,
         @Nullable String filter,
+        @Nullable String orderBy,
         @Nullable String pageToken)
         throws IOException {
-      return client.makeHL7v2ListRequest(hl7v2Store, filter, pageToken);
+      return client.makeSendTimeBoundHL7v2ListRequest(
+          hl7v2Store, start, end, filter, orderBy, pageToken);
     }
 
     @Override
     public Iterator<List<HL7v2Message>> iterator() {
-      return new HL7v2MessagePagesIterator(this.client, this.hl7v2Store, this.filter);
+      return new HL7v2MessagePagesIterator(
+          this.client, this.hl7v2Store, this.start, this.end, this.filter, this.orderBy);
     }
 
     /** The type Hl7v2 message id pages iterator. */
@@ -518,6 +620,9 @@ public class HttpHealthcareApiClient implements HealthcareApiClient, Serializabl
 
       private final String hl7v2Store;
       private final String filter;
+      private final String orderBy;
+      private final Instant start;
+      private final Instant end;
       private HealthcareApiClient client;
       private String pageToken;
       private boolean isFirstRequest;
@@ -530,10 +635,18 @@ public class HttpHealthcareApiClient implements HealthcareApiClient, Serializabl
        * @param filter the filter
        */
       HL7v2MessagePagesIterator(
-          HealthcareApiClient client, String hl7v2Store, @Nullable String filter) {
+          HealthcareApiClient client,
+          String hl7v2Store,
+          @Nullable Instant start,
+          @Nullable Instant end,
+          @Nullable String filter,
+          @Nullable String orderBy) {
         this.client = client;
         this.hl7v2Store = hl7v2Store;
+        this.start = start;
+        this.end = end;
         this.filter = filter;
+        this.orderBy = orderBy;
         this.pageToken = null;
         this.isFirstRequest = true;
       }
@@ -542,7 +655,8 @@ public class HttpHealthcareApiClient implements HealthcareApiClient, Serializabl
       public boolean hasNext() throws NoSuchElementException {
         if (isFirstRequest) {
           try {
-            ListMessagesResponse response = makeListRequest(client, hl7v2Store, filter, pageToken);
+            ListMessagesResponse response =
+                makeListRequest(client, hl7v2Store, start, end, filter, orderBy, pageToken);
             List<Message> msgs = response.getHl7V2Messages();
             if (msgs == null) {
               return false;
@@ -562,7 +676,8 @@ public class HttpHealthcareApiClient implements HealthcareApiClient, Serializabl
       @Override
       public List<HL7v2Message> next() throws NoSuchElementException {
         try {
-          ListMessagesResponse response = makeListRequest(client, hl7v2Store, filter, pageToken);
+          ListMessagesResponse response =
+              makeListRequest(client, hl7v2Store, start, end, filter, orderBy, pageToken);
           this.isFirstRequest = false;
           this.pageToken = response.getNextPageToken();
           return response.getHl7V2Messages().stream()

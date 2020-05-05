@@ -28,8 +28,6 @@ import java.util.stream.Collectors;
 import org.apache.beam.sdk.io.gcp.healthcare.HttpHealthcareApiClient.HL7v2MessagePages;
 import org.apache.beam.sdk.transforms.Create;
 import org.apache.beam.sdk.transforms.DoFn;
-import org.apache.beam.sdk.transforms.DoFn.ProcessContext;
-import org.apache.beam.sdk.transforms.DoFn.ProcessElement;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.values.PBegin;
@@ -40,8 +38,11 @@ import org.joda.time.Instant;
 class HL7v2IOTestUtil {
   public static final long HL7V2_INDEXING_TIMEOUT_MINUTES = 10L;
   /** Google Cloud Healthcare Dataset in Apache Beam integration test project. */
+  // TODO(jaketf) switch back to official dataset
   public static final String HEALTHCARE_DATASET_TEMPLATE =
-      "projects/%s/locations/us-central1/datasets/apache-beam-integration-testing";
+      "projects/%s/locations/us-central1/datasets/jferriero-integration-testing";
+  // public static final String HEALTHCARE_DATASET_TEMPLATE =
+  //     "projects/%s/locations/us-central1/datasets/apache-beam-integration-testing";
 
   // Could generate more messages at scale using a tool like
   // https://synthetichealth.github.io/synthea/ if necessary chose not to avoid the dependency.
@@ -58,7 +59,7 @@ class HL7v2IOTestUtil {
               + "AL1|2|allergy|Z91.013^Personal history of allergy to sea food^ZAL|SEVERE|Swollen face|\r"
               + "AL1|3|allergy|Z91.040^Latex allergy^ZAL|MODERATE|Raised, itchy, red rash|",
           // Another ADT Message
-          "MSH|^~\\&|hl7Integration|hl7Integration|||||ADT^A08|||2.5|\r"
+          "MSH|^~\\&|hl7Integration|hl7Integration|||20190309132544||ADT^A08|||2.5|\r"
               + "EVN|A01|20130617154644||foo\r"
               + "PID|1|465 306 5961||407623|Wood^Patrick^^^MR||19700101|1|||High Street^^Oxford^^Ox1 4DP~George St^^Oxford^^Ox1 5AP|||||||\r"
               + "NK1|1|Wood^John^^^MR|Father||999-9999\r"
@@ -89,7 +90,7 @@ class HL7v2IOTestUtil {
   /** Clear all messages from the HL7v2 store. */
   static void deleteAllHL7v2Messages(HealthcareApiClient client, String hl7v2Store)
       throws IOException {
-    for (List<HL7v2Message> page : new HL7v2MessagePages(client, hl7v2Store)) {
+    for (List<HL7v2Message> page : new HL7v2MessagePages(client, hl7v2Store, null, null)) {
       for (String msgId : page.stream().map(HL7v2Message::getName).collect(Collectors.toList())) {
         client.deleteHL7v2Message(msgId);
       }
@@ -108,7 +109,7 @@ class HL7v2IOTestUtil {
       numListedMessages = 0;
       // count messages in HL7v2 Store.
       for (List<HL7v2Message> page :
-          new HttpHealthcareApiClient.HL7v2MessagePages(client, hl7v2Store)) {
+          new HttpHealthcareApiClient.HL7v2MessagePages(client, hl7v2Store, null, null)) {
         numListedMessages += page.size();
       }
       if (numListedMessages == expectedNumMessages) {
@@ -217,7 +218,8 @@ class HL7v2IOTestUtil {
       String hl7v2Store = context.element();
       // Output all elements of all pages.
       HttpHealthcareApiClient.HL7v2MessagePages pages =
-          new HttpHealthcareApiClient.HL7v2MessagePages(client, hl7v2Store, this.filter);
+          new HttpHealthcareApiClient.HL7v2MessagePages(
+              client, hl7v2Store, null, null, this.filter, "sendTime");
       for (List<HL7v2Message> page : pages) {
         page.stream().map(HL7v2Message::getName).forEach(context::output);
       }

@@ -25,18 +25,24 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import javax.annotation.Nullable;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
 import org.apache.beam.sdk.io.gcp.pubsub.PubsubIO;
+import org.apache.beam.sdk.io.range.OffsetRange;
 import org.apache.beam.sdk.metrics.Counter;
+import org.apache.beam.sdk.metrics.Distribution;
 import org.apache.beam.sdk.metrics.Metrics;
 import org.apache.beam.sdk.options.ValueProvider;
 import org.apache.beam.sdk.options.ValueProvider.StaticValueProvider;
 import org.apache.beam.sdk.transforms.Create;
 import org.apache.beam.sdk.transforms.DoFn;
+import org.apache.beam.sdk.transforms.DoFn.BoundedPerElement;
 import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.Reshuffle;
+import org.apache.beam.sdk.transforms.splittabledofn.OffsetRangeTracker;
+import org.apache.beam.sdk.transforms.splittabledofn.RestrictionTracker;
 import org.apache.beam.sdk.values.PBegin;
 import org.apache.beam.sdk.values.PCollection;
 import org.apache.beam.sdk.values.PCollectionTuple;
@@ -47,6 +53,8 @@ import org.apache.beam.sdk.values.TupleTag;
 import org.apache.beam.sdk.values.TupleTagList;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.base.Throwables;
 import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableMap;
+import org.joda.time.Duration;
+import org.joda.time.Instant;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -412,10 +420,29 @@ public class HL7v2IO {
     }
   }
 
-  /** List HL7v2 messages in HL7v2 Stores with optional filter. */
+  /**
+   * List HL7v2 messages in HL7v2 Stores with optional filter.
+   *
+   * <p>This transform is optimized for dynamic splitting of message.list calls for large batches of
+   * historical data and assumes rather continuous stream of sendTimes. It will dynamically
+   * rebalance resources to handle "peak traffic times" but will waste resources if there are large
+   * durations (days) of the sendTime dimension without data.
+   *
+   * <p>Implementation includes overhead for: 1. two api calls to determine the min/max sendTime of
+   * the HL7v2 store at invocation time. 2. initial splitting into non-overlapping time ranges
+   * (default daily) to achieve parallelization in separate messages.list calls.
+   *
+   * <p>This will make more queries than necessary when used with very small data sets. (or very
+   * sparse data sets in the sendTime dimension).
+   *
+   * <p>If you have large but sparse data (e.g. hours between consecutive message sendTimes) and
+   * know something about the time ranges where you have no data, consider using multiple instances
+   * of this transform specifying sendTime filters to omit the ranges where there is no data.
+   */
   public static class ListHL7v2Messages extends PTransform<PBegin, PCollection<HL7v2Message>> {
     private final List<String> hl7v2Stores;
-    private final String filter;
+    private String filter;
+    private Duration initialSplitDuration;
 
     /**
      * Instantiates a new List HL7v2 message IDs with filter.
@@ -428,34 +455,89 @@ public class HL7v2IO {
       this.filter = filter.get();
     }
 
+    /**
+     * Instantiates a new List hl 7 v 2 messages.
+     *
+     * @param hl7v2Stores the hl 7 v 2 stores
+     * @param filter the filter
+     * @param initialSplitDuration the initial split duration for sendTime dimension splits
+     */
+    ListHL7v2Messages(
+        ValueProvider<List<String>> hl7v2Stores,
+        ValueProvider<String> filter,
+        Duration initialSplitDuration) {
+      this.hl7v2Stores = hl7v2Stores.get();
+      this.filter = filter.get();
+      this.initialSplitDuration = initialSplitDuration;
+    }
+
+    /**
+     * Instantiates a new List hl7v2 messages.
+     *
+     * @param hl7v2Stores the hl7v2 stores
+     */
     ListHL7v2Messages(ValueProvider<List<String>> hl7v2Stores) {
       this.hl7v2Stores = hl7v2Stores.get();
       this.filter = null;
+    }
+
+    /**
+     * Instantiates a new List hl7v2 messages.
+     *
+     * @param hl7v2Stores the hl7v2 stores
+     * @param initialSplitDuration the initial split duration
+     */
+    ListHL7v2Messages(
+        ValueProvider<List<String>> hl7v2Stores,
+        Duration initialSplitDuration) {
+      this.hl7v2Stores = hl7v2Stores.get();
+      this.initialSplitDuration = initialSplitDuration;
     }
 
     @Override
     public PCollection<HL7v2Message> expand(PBegin input) {
       return input
           .apply(Create.of(this.hl7v2Stores))
-          .apply(ParDo.of(new ListHL7v2MessagesFn(this.filter)))
+          .apply(ParDo.of(new ListHL7v2MessagesFn(this.filter, initialSplitDuration)))
           .setCoder(new HL7v2MessageCoder())
           // Break fusion to encourage parallelization of downstream processing.
           .apply(Reshuffle.viaRandomKey());
     }
   }
 
+  /**
+   * Implemented as Splitable DoFn that claims millisecond resolutions of offset restrictions in the
+   * Message.sendTime dimension.
+   */
+  @BoundedPerElement
   static class ListHL7v2MessagesFn extends DoFn<String, HL7v2Message> {
 
-    private final String filter;
+    private static final Logger LOG = LoggerFactory.getLogger(ListHL7v2MessagesFn.class);
+    private String filter;
+    // TODO(jaketf) what are reasonable defaults here?
+    // These control the initial restriction split which means that the list of integer pairs
+    // must comfortably fit in memory.
+    private static final Duration DEFAULT_DESIRED_SPLIT_DURATION = Duration.standardDays(1);
+    private static final Duration DEFAULT_MIN_SPLIT_DURATION = Duration.standardHours(1);
+    private Duration initialSplitDuration;
+    private Instant from;
+    private Instant to;
     private transient HealthcareApiClient client;
-
+    private Distribution messageListingLatencyMs =
+        Metrics.distribution(ListHL7v2MessagesFn.class, "message-list-pagination-latency-ms");
     /**
      * Instantiates a new List HL7v2 fn.
      *
      * @param filter the filter
      */
     ListHL7v2MessagesFn(String filter) {
+      new ListHL7v2MessagesFn(filter, null);
+    }
+
+    ListHL7v2MessagesFn(String filter, @Nullable Duration initialSplitDuration) {
       this.filter = filter;
+      this.initialSplitDuration =
+          (initialSplitDuration == null) ? DEFAULT_DESIRED_SPLIT_DURATION : initialSplitDuration;
     }
 
     /**
@@ -468,17 +550,148 @@ public class HL7v2IO {
       this.client = new HttpHealthcareApiClient();
     }
 
+    @GetInitialRestriction
+    public OffsetRange getEarliestToNowRestriction(@Element String hl7v2Store) throws IOException {
+      from = this.client.getEarliestHL7v2SendTime(hl7v2Store, this.filter);
+      // filters are [from, to) to match logic of OffsetRangeTracker but need latest element to be
+      // included in results set to add an extra ms to the upper bound.
+      to = this.client.getLatestHL7v2SendTime(hl7v2Store, this.filter).plus(1);
+      return new OffsetRange(from.getMillis(), to.getMillis());
+    }
+
+    @NewTracker
+    public OffsetRangeTracker newTracker(@Restriction OffsetRange timeRange) {
+      return timeRange.newTracker();
+    }
+
+    @SplitRestriction
+    public void split(@Restriction OffsetRange timeRange, OutputReceiver<OffsetRange> out) {
+      // TODO(jaketf) How to pick optimal values for desiredNumOffsetsPerSplit ?
+      List<OffsetRange> splits =
+          timeRange.split(initialSplitDuration.getMillis(), DEFAULT_MIN_SPLIT_DURATION.getMillis());
+      Instant from = Instant.ofEpochMilli(timeRange.getFrom());
+      Instant to = Instant.ofEpochMilli(timeRange.getTo());
+      Duration totalDuration = new Duration(from, to);
+      LOG.info(
+          String.format(
+              "splitting initial sendTime restriction of [minSendTime, now): [%s,%s), "
+                  + "or [%s, %s). \n"
+                  + "total days: %s \n"
+                  + "into %s splits. \n"
+                  + "Last split: %s",
+              from,
+              to,
+              timeRange.getFrom(),
+              timeRange.getTo(),
+              totalDuration.getStandardDays(),
+              splits.size(),
+              splits.get(splits.size() - 1).toString()));
+
+      for (OffsetRange s : splits) {
+        out.output(s);
+      }
+    }
+
     /**
      * List messages.
      *
-     * @param context the context
+     * @param hl7v2Store the HL7v2 store to list messages from
      * @throws IOException the io exception
      */
     @ProcessElement
-    public void listMessages(ProcessContext context) throws IOException {
-      String hl7v2Store = context.element();
-      // Output all elements of all pages.
-      this.client.getHL7v2MessageStream(hl7v2Store, this.filter).forEach(context::output);
+    public void listMessages(
+        @Element String hl7v2Store,
+        RestrictionTracker tracker,
+        OutputReceiver<HL7v2Message> outputReceiver)
+        throws IOException {
+      OffsetRange currentRestriction = (OffsetRange) tracker.currentRestriction();
+      Instant startRestriction = Instant.ofEpochMilli(currentRestriction.getFrom());
+      Instant endRestriction = Instant.ofEpochMilli(currentRestriction.getTo());
+      HttpHealthcareApiClient.HL7v2MessagePages pages =
+          new HttpHealthcareApiClient.HL7v2MessagePages(
+              client, hl7v2Store, startRestriction, endRestriction, filter, "sendTime");
+      long reqestTime = Instant.now().getMillis();
+      // TODO(jaketf) this code is hard to follow. Break this up into unit testable pieces.
+      // [Start] Hard to read, hard to test, hard to maintain code.
+      long lastClaimedMilliSecond = currentRestriction.getFrom();
+      Instant cursor = Instant.ofEpochMilli(currentRestriction.getFrom());
+      boolean hangingClaim = false; // flag if the claimed ms spans spills over to the next page.
+      for (List<HL7v2Message> page : pages) { // loop over pages.
+        int i = 0;
+        HL7v2Message msg = page.get(i);
+        while (i < page.size()) { // loop over messages in page
+          cursor = Instant.parse(msg.getSendTime());
+          if (!hangingClaim) {
+            // claim all outstanding ms up until this message.
+            for (long j = lastClaimedMilliSecond + 1; j < cursor.getMillis(); j++) {
+              if (!tracker.tryClaim(j)) {
+                break;
+              }
+            }
+          }
+          lastClaimedMilliSecond = cursor.getMillis();
+          LOG.info(
+              String.format(
+                  "initial claim for page %s lastClaimedMilliSecond = %s",
+                  i, lastClaimedMilliSecond));
+          if (hangingClaim || tracker.tryClaim(lastClaimedMilliSecond)) {
+            // This means we have claimed an entire millisecond we need to make sure that we
+            // process all messages for this millisecond because sendTime is nano second resolution.
+            // https://cloud.google.com/healthcare/docs/reference/rest/v1beta1/projects.locations.datasets.hl7V2Stores.messages#Message
+            while (cursor.getMillis() == lastClaimedMilliSecond
+                && i < page.size()) { // loop over messages in millisecond.
+              outputReceiver.output(msg);
+              msg = page.get(i++);
+              cursor = Instant.parse(msg.getSendTime());
+            }
+
+            if (i == page.size() && cursor.getMillis() == lastClaimedMilliSecond) {
+              // reached the end of the page and timestamp still in the claimed ms.
+              hangingClaim = true;
+              continue;
+            }
+
+            // If reached this point, msg.sendTime is outside the current claim.
+            // Need to claim all milliseconds until cursor to properly advance the tracker.
+            // TODO(jaketf): claiming every ms between messages in these for loops is very
+            // inefficient! consider claiming larger intervals or implementing a different kind of
+            // tracker.
+            for (long j = lastClaimedMilliSecond + 1;
+                j <= cursor.getMillis();
+                j++) { // loop over and claim milliseconds between messages.
+              if (!tracker.tryClaim(j)) {
+                break;
+              }
+              lastClaimedMilliSecond++;
+            }
+            LOG.info(
+                String.format(
+                    "After claiming between messages lastClaimedMilliSecond = %s",
+                    lastClaimedMilliSecond));
+          }
+        }
+        messageListingLatencyMs.update(Instant.now().getMillis() - reqestTime);
+        reqestTime =
+            Instant.now()
+                .getMillis(); // this is for updating listing latency metric in next iteration.
+      }
+
+      if (lastClaimedMilliSecond == currentRestriction.getFrom()) {
+        // no messages found for this time interval need to claim first ms in the restriction
+        // before claiming the rest in the loop below.
+        if (!tracker.tryClaim(lastClaimedMilliSecond)) {
+          return;
+        }
+      }
+
+      // loop over and claim milliseconds between last claimed ms and end of OffsetRange to it is
+      // completely claimed.
+      for (long j = lastClaimedMilliSecond + 1; j <= currentRestriction.getTo(); j++) {
+        if (!tracker.tryClaim(j)) {
+          break;
+        }
+      }
+      // [End] Hard to read, hard to test, hard to maintain code
     }
   }
 
@@ -621,6 +834,8 @@ public class HL7v2IO {
       // TODO when the healthcare API releases a bulk import method this should use that to improve
       // throughput.
 
+      private Distribution messageIngestLatencyMs =
+          Metrics.distribution(WriteHL7v2Fn.class, "message-ingest-latency-ms");
       private Counter failedMessageWrites =
           Metrics.counter(WriteHL7v2Fn.class, "failed-hl7v2-message-writes");
       private final String hl7v2Store;
@@ -661,6 +876,10 @@ public class HL7v2IO {
       public void writeMessages(ProcessContext context) {
         HL7v2Message msg = context.element();
         long startTime = System.currentTimeMillis();
+        // all fields but data and labels should be null for ingest.
+        Message model = new Message();
+        model.setData(msg.getData());
+        model.setLabels(msg.getLabels());
         switch (writeMethod) {
           case BATCH_IMPORT:
             // TODO once healthcare API exposes batch import API add that functionality here to
@@ -669,7 +888,9 @@ public class HL7v2IO {
           case INGEST:
           default:
             try {
-              client.ingestHL7v2Message(hl7v2Store, msg.toModel());
+              long requestTimestamp = Instant.now().getMillis();
+              client.ingestHL7v2Message(hl7v2Store, model);
+              messageIngestLatencyMs.update(Instant.now().getMillis() - requestTimestamp);
             } catch (Exception e) {
               failedMessageWrites.inc();
               LOG.warn(
